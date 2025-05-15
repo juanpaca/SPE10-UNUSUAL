@@ -1,0 +1,197 @@
+/*
+Improved UNUSUAL method for reaction-diffusion problems
+considering variable coeficients 
+*/ 
+
+load "qf11to25" // Load the QF11to25 module (for quadrature formulas)
+load "iovtk"
+
+//---------------------------Macros---------------------------------
+macro div(u,v) (dx(u) + dy(v)) //
+macro normal [N.x,N.y] //
+macro grad(u) [dx(u), dy(u)] //
+
+//-----------------Model parameters----------------------------------
+real forder = 25;
+real epsilon = 1e-5;        //Diffussion
+real sigmaVal = 1e-2;           //Reaction
+
+//func real kappa(real x,real y) {
+//        return epsilon;
+//    }
+
+func real sigma(real x,real y) {
+        return sigmaVal;
+    }
+
+//Smooth analytical solution for tests
+// func uEx = x*(1-x);
+// func dxu = 1-2*x;
+// func dyu = 0;
+// func f = 2 * epsilon + sigmaVal*x*(1 - x);
+
+//Boundary layer solution for tests
+    // real const = sqrt(sigmaVal/epsilon);
+    // func uEx = (1 / sigmaVal)*( ( 1 / sinh(const)) * ( sinh( const*(x-1) ) - sinh(const*x) ) + 1   );
+    // func dxu = (const / (sigmaVal * sinh(const) ) )*( cosh( const*(x-1) ) - cosh(const*x) );
+    // func dyu = 0;
+    // func f = 1.0;
+
+//--------------------------------------------SPE10-Problem-----------------------------------------------------------
+func f = 0.0;
+//Reading coeficients from a file
+int nrows;
+// string fileName = "spe_perm1.txt";
+string fileName = "layerSPE10/spe_perm36.txt";
+ifstream  file(fileName);
+
+// Read the matrix dimensions from the file
+file >> nrows;
+
+real[int] tabkappa(nrows);
+for(int i=0; i<nrows; i++){
+    file >> tabkappa(i);
+}
+
+//cout << "\ntabkappa:" << tabkappa << "\n";
+
+ func real kappa(real x, real y) {
+     real Lx = 1200., Ly=2200.;
+
+    real Nx = floor(x/Lx*60);
+     if(Nx>=60){
+         Nx=59;
+     }
+
+     real Ny = floor(y/Ly*220);
+     if(Ny>=220){
+         Ny=219;
+     }
+
+     int position = Nx + 60*Ny;
+     // cout << tabkappa(position) << "\n";
+     return tabkappa(position);
+ }
+
+//----------------------------------------Define the mesh and spaces-------------------------------------------------------
+
+//[0,1]^2
+//  real x0 = 0.;
+//  real x1 = 1;
+//  real y0 = 0;
+//  real y1 = 1;
+
+//SPE-10 Domain
+ real x0 = 0.;
+ real x1 = 1200;
+ real y0 = 0;
+ real y1 = 2200;
+
+//Structured mesh test
+int coarseMesh = 1;
+//mesh calP = square(2^coarseMesh, 2^coarseMesh);
+
+//Unstructured mesh test
+border bottom(t=0,1){ x = x0 + (x1 - x0)*t; y = y0; label=1; }
+border right(t=0,1){ x = x1; y = y0 + (y1 - y0)*t; label=2; }
+border top(t=0,1){ x = x1 - (x1 - x0)*t; y = y1; label=3; }
+border left(t=0,1){ x = x0; y = y1 - (y1 - y0)*t; label=4; } 
+
+//construction of unstructured mesh
+mesh calP = buildmesh(bottom(2^coarseMesh) + right(2^coarseMesh) + top(2^coarseMesh) + left(2^coarseMesh));
+//plot(calP, wait=1); //Plot the mesh
+
+fespace Vh(calP, P1); //FEM space for test functions and solution
+fespace Rh(calP, P0); //Space for constant by triangle
+
+//-----------------------------------------Maximum of kappa and sigma in each K---------------------------------------------
+Vh kappaInterpol = kappa(x,y); //Interpolation of kappa
+Vh sigmaInterpol = sigma(x,y); //Interpolation of sigma
+//cout << "kappaInterpol = " << kappaInterpol[] << endl; //Print the interpolation of kappa
+//plot(kappaInterpol,  wait=1); //Plot the interpolation of kappa 
+Rh sigmaMax; //Max of sigma in each triangle
+Rh kappaMax; //Max of kappa in each triangle
+
+//Finding the maximum in each triangle (this procedure works for P1 elements)
+for (int i = 0; i < calP.nt; i++) {
+    //Obtain the vertices of the triangle i
+    int v0 = calP[i][0];
+    int v1 = calP[i][1];
+    int v2 = calP[i][2];
+    
+    //Obtain the absolute interpolation values at the vertices
+    real valkappa0 = abs(kappaInterpol[][v0]);
+    real valkappa1 = abs(kappaInterpol[][v1]);
+    real valkappa2 = abs(kappaInterpol[][v2]);
+
+    real valsigma0 = abs(sigmaInterpol[][v0]);
+    real valsigma1 = abs(sigmaInterpol[][v1]);
+    real valsigma2 = abs(sigmaInterpol[][v2]);
+    
+    //Obtain the maximum value in the triangle (among the three vertices for P1)
+    real maxKappaTri = max(valkappa0, max(valkappa1, valkappa2));
+    real maxSigmaTri = max(valsigma0, max(valsigma1, valsigma2));
+    
+    //Assign the maximum value to the corresponding triangle in the Rh space
+    kappaMax[][i] = maxKappaTri; 
+    sigmaMax[][i] = maxSigmaTri;
+}
+
+//Verification
+
+
+
+//-----------------------------------------Stabilization parameters----------------------------------------------
+
+Rh tau; //Stabilization parameter
+real mk = 1.0/3.0; // mk = max(1/3 , Ck), but we take 1/3
+Rh Pe1 = (2*kappaMax) /(mk * hTriangle^2 * sigmaMax) ; //Peclet type number
+//cout << "Pe1 = " << Pe1[] << endl; //Print the Pe1 number
+Rh MaxValuePe = max(Pe1 ,1); //Max of Pe1
+//cout << "MaxValuePe = " << MaxValuePe[] << endl; //Print the max of Pe1
+
+//some parameters to test:
+
+tau = hTriangle^2 / (sigmaVal * hTriangle^2 + epsilon); //Franca, Farhat(1995) parameter
+
+//tau = (mk *hTriangle^2) / (mk* sigmaMax * MaxValuePe * hTriangle^2 + 2*kappaMax); //Franca, Valentin(2000) parameter
+
+//tau = 0.0; //Galerkin case
+cout << "tau = " << tau[] << endl; //Print the tau
+
+/*
+
+//-----------------------------------------Variational formulation------------------------------------------------
+Vh uh, vh; //solution and test function
+
+varf a(uh, vh) = int2d(calP )(sigma(x,y)*uh*vh 
+                + kappa(x,y)*( dx(uh)*dx(vh) + dy(uh)*dy(vh) )  
+                - tau * (sigma(x,y)*uh -  kappa(x,y)*(dxx(uh) + dyy(uh)) ) * ( sigma(x,y)*vh -  kappa(x,y)*(dxx(vh) + dyy(vh))  )  )  
+                + on(2, uh = 0.0) // left side
+                + on(4, uh = 0.0); // Right side
+
+ varf L(unused, vh) =
+         int2d(calP , qforder = forder )(f*vh
+         - f*tau*( sigma(x,y)*vh -  kappa(x,y)*(dxx(vh) + dyy(vh))    ) )
+         + on(2, unused = 0.0) // left side
+         + on(4, unused = 0.0); // Right side
+
+
+//--------------------------------Solving the system-----------------------------------
+
+matrix A = a(Vh, Vh); //Matrix A
+real[int] F = L(0, Vh); //Right-hand side vector
+set(A, solver=sparsesolver);
+uh[] = A^-1 * F; //Solve the system
+
+//plot(uh, wait=1); //Plot the solution
+
+
+//------------Export solution to VTK------------------------
+     //int[int] Order = [1]; //Order of what?
+     //string DataName = "uH";
+     //savevtk("solution_UNFVP1_SPE10.vtu", calP, uh, dataname=DataName, order=Order);
+
+
+
+*/
